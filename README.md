@@ -1,7 +1,8 @@
 # Tactum API
 
 Backend for the [Tactum website](../tactum-website): newsletter leads, Stripe deposit payments and
-glove reservations. FastAPI + SQLAlchemy 2 (async) on PostgreSQL (AWS RDS in production).
+glove reservations. FastAPI + [asyncpg](https://magicstack.github.io/asyncpg/) on PostgreSQL (AWS RDS in production).
+There is no ORM: queries are plain SQL strings and the schema is plain SQL files.
 
 Moving the backend out of the Next.js app is described step by step in
 [docs/MIGRATION.md](docs/MIGRATION.md).
@@ -27,14 +28,13 @@ to a translated message. Interactive docs are at `/docs` when `ENVIRONMENT=devel
 app/
   main.py            app factory, middleware, lifespan (starts the live counter listener)
   config.py          settings from environment variables / .env
-  db.py              async engine and session dependency
+  db.py              asyncpg pool and the per-request connection dependency
   errors.py          ApiError, request IDs, central error handlers
   dependencies.py    shared FastAPI dependencies (Stripe client, pricing, broadcaster)
-  models/            SQLAlchemy tables
   schemas/           Pydantic request/response bodies
   routers/           HTTP endpoints, thin: validate, call a service, shape the response
-  services/          business logic (leads, payments, reservations, live counter)
-alembic/             database migrations
+  services/          business logic and its SQL (leads, payments, reservations, live counter)
+migrations/          the database schema, as numbered .sql files
 scripts/             one-off tasks (copying data from MongoDB)
 tests/               unit tests, plus integration tests when TEST_DATABASE_URL is set
 ```
@@ -53,7 +53,7 @@ You need a PostgreSQL 17 database. The simplest option on Windows is
 `winget install PostgreSQL.PostgreSQL.17`. Then create the database and apply the migrations:
 
 ```powershell
-uv run alembic upgrade head
+uv run python -m scripts.migrate
 uv run uvicorn app.main:app --reload
 ```
 
@@ -75,12 +75,25 @@ uv run ruff check . ; uv run ruff format --check .
 
 ## Database changes
 
-Edit the models in `app/models/`, then generate and review a migration:
+The schema lives in `migrations/`, as numbered SQL files (`0002_add_something.sql`). Add a new
+file for each change and never edit one that has already been applied:
 
 ```powershell
-uv run alembic revision --autogenerate -m "describe the change"
-uv run alembic upgrade head
+uv run python -m scripts.migrate
 ```
 
-Autogenerate does not see triggers or functions. The live counter depends on the
-`reservations_changed` trigger created in the first migration.
+The runner applies the files that haven't run yet, each in its own transaction, and records them
+in the `schema_migrations` table. Migrations only move forward; to undo one, write a new file.
+The live counter depends on the `reservations_changed` trigger from the first migration.
+
+`updated_at` is not touched automatically: every `UPDATE` and `ON CONFLICT DO UPDATE` must set
+`updated_at = now()` itself.
+
+If the database was created earlier with Alembic, mark the first migration as already applied
+instead of running it, then drop the old bookkeeping table:
+
+```sql
+CREATE TABLE schema_migrations (version text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now());
+INSERT INTO schema_migrations (version) VALUES ('0001_create_users_and_reservations');
+DROP TABLE alembic_version;
+```

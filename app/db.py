@@ -1,15 +1,11 @@
 import ssl
 from collections.abc import AsyncIterator
-from functools import lru_cache
+from typing import cast
 
-from sqlalchemy.ext.asyncio import (
-    AsyncEngine,
-    AsyncSession,
-    async_sessionmaker,
-    create_async_engine,
-)
+import asyncpg
+from fastapi import Request
 
-from app.config import DatabaseSettings, get_database_settings
+from app.config import DatabaseSettings
 
 
 def ssl_option(settings: DatabaseSettings) -> ssl.SSLContext | str | bool:
@@ -21,24 +17,24 @@ def ssl_option(settings: DatabaseSettings) -> ssl.SSLContext | str | bool:
     return settings.database_ssl
 
 
-@lru_cache
-def get_engine() -> AsyncEngine:
-    settings = get_database_settings()
-    return create_async_engine(
-        settings.sqlalchemy_url,
-        connect_args={"ssl": ssl_option(settings)},
-        pool_size=5,
-        max_overflow=5,
-        # Drops connections that died during an RDS failover or restart.
-        pool_pre_ping=True,
+async def create_pool(settings: DatabaseSettings) -> asyncpg.Pool:
+    return await asyncpg.create_pool(
+        settings.database_url,
+        ssl=ssl_option(settings),
+        # Starts without opening a connection, so the API still boots while the database is
+        # down and /health/db can report it.
+        min_size=0,
+        max_size=10,
+        # Closes idle connections before an RDS failover or restart can leave them dead.
+        max_inactive_connection_lifetime=300,
     )
 
 
-@lru_cache
-def get_sessionmaker() -> async_sessionmaker[AsyncSession]:
-    return async_sessionmaker(get_engine(), expire_on_commit=False)
+def get_pool(request: Request) -> asyncpg.Pool:
+    return cast(asyncpg.Pool, request.app.state.pool)
 
 
-async def get_session() -> AsyncIterator[AsyncSession]:
-    async with get_sessionmaker()() as session:
-        yield session
+async def get_connection(request: Request) -> AsyncIterator[asyncpg.Connection]:
+    """One connection from the pool for the length of the request."""
+    async with get_pool(request).acquire() as connection:
+        yield connection

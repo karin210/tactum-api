@@ -3,11 +3,11 @@ import json
 from collections.abc import AsyncIterator
 from typing import Annotated
 
+import asyncpg
 from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
-from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db import get_session
+from app.db import get_connection
 from app.dependencies import get_count_broadcaster
 from app.errors import ApiError
 from app.schemas.reservations import ReservationCount
@@ -22,9 +22,9 @@ KEEP_ALIVE_SECONDS = 15
 
 @router.get("/count")
 async def reservation_count(
-    session: Annotated[AsyncSession, Depends(get_session)],
+    connection: Annotated[asyncpg.Connection, Depends(get_connection)],
 ) -> ReservationCount:
-    return ReservationCount(count=await count_reservations(session))
+    return ReservationCount(count=await count_reservations(connection))
 
 
 @router.get("/count/stream", response_class=StreamingResponse)

@@ -1,12 +1,12 @@
 import json
 from typing import Annotated
 
+import asyncpg
 import stripe
 from fastapi import APIRouter, Depends, Header, Request
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings, get_settings
-from app.db import get_session
+from app.db import get_connection
 from app.errors import ApiError
 from app.schemas.payments import WebhookAck
 from app.services.reservations import record_deposit
@@ -18,7 +18,7 @@ router = APIRouter(prefix="/webhooks", tags=["webhooks"])
 async def stripe_webhook(
     request: Request,
     settings: Annotated[Settings, Depends(get_settings)],
-    session: Annotated[AsyncSession, Depends(get_session)],
+    connection: Annotated[asyncpg.Connection, Depends(get_connection)],
     stripe_signature: Annotated[str | None, Header()] = None,
 ) -> WebhookAck:
     # The signature is computed over the exact bytes Stripe sent, so read the raw body.
@@ -34,6 +34,6 @@ async def stripe_webhook(
     event = json.loads(payload)
     if event["type"] == "payment_intent.succeeded":
         # A database failure here becomes a 500, which makes Stripe retry the delivery.
-        await record_deposit(session, event["data"]["object"])
+        await record_deposit(connection, event["data"]["object"])
 
     return WebhookAck()

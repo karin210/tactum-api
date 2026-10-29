@@ -19,6 +19,7 @@ os.environ.setdefault("ENVIRONMENT", "development")
 
 from fastapi.testclient import TestClient  # noqa: E402
 
+from app.db import get_connection  # noqa: E402
 from app.main import app  # noqa: E402
 
 requires_database = pytest.mark.skipif(
@@ -30,6 +31,8 @@ requires_database = pytest.mark.skipif(
 @pytest.fixture
 def client() -> Iterator[TestClient]:
     """A client without the lifespan, so no database connection is opened."""
+    # FastAPI resolves dependencies before validating the body, so the connection is stubbed.
+    app.dependency_overrides[get_connection] = lambda: None
     yield TestClient(app)
     app.dependency_overrides.clear()
 

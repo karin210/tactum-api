@@ -3,20 +3,46 @@ from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
-from sqlalchemy import func, select
-from sqlalchemy.dialects.postgresql import insert
-from sqlalchemy.ext.asyncio import AsyncSession
-
-from app.models import Reservation, User
+import asyncpg
 
 logger = logging.getLogger(__name__)
 
+# A lead who pays becomes a customer; a payer we've never seen is created as one.
+UPSERT_CUSTOMER = """
+    INSERT INTO users (email, user_type)
+    VALUES ($1, 'customer')
+    ON CONFLICT (email) DO UPDATE SET user_type = 'customer', updated_at = now()
+    RETURNING id
+"""
 
-async def count_reservations(session: AsyncSession) -> int:
-    return await session.scalar(select(func.count()).select_from(Reservation)) or 0
+# Keyed on the unique deposit_payment_intent_id, so a webhook delivered twice updates the
+# same reservation instead of adding a second one.
+UPSERT_DEPOSIT_RESERVATION = """
+    INSERT INTO reservations (
+        user_id, status, total_price, deposit_amount, balance_amount, currency,
+        stripe_customer_id, deposit_payment_intent_id, payment_status, reservation_date, city
+    )
+    VALUES ($1, 'confirmed', $2, $3, $4, $5, $6, $7, 'deposit_paid', $8, $9)
+    ON CONFLICT (deposit_payment_intent_id) DO UPDATE SET
+        user_id = EXCLUDED.user_id,
+        status = EXCLUDED.status,
+        total_price = EXCLUDED.total_price,
+        deposit_amount = EXCLUDED.deposit_amount,
+        balance_amount = EXCLUDED.balance_amount,
+        currency = EXCLUDED.currency,
+        stripe_customer_id = EXCLUDED.stripe_customer_id,
+        payment_status = EXCLUDED.payment_status,
+        reservation_date = EXCLUDED.reservation_date,
+        city = EXCLUDED.city,
+        updated_at = now()
+"""
 
 
-async def record_deposit(session: AsyncSession, payment_intent: dict[str, Any]) -> None:
+async def count_reservations(connection: asyncpg.Connection) -> int:
+    return await connection.fetchval("SELECT count(*) FROM reservations")
+
+
+async def record_deposit(connection: asyncpg.Connection, payment_intent: dict[str, Any]) -> None:
     """Turn a succeeded deposit PaymentIntent into a customer and a confirmed reservation.
 
     Safe to run more than once for the same intent: Stripe may deliver a webhook twice,
@@ -39,34 +65,20 @@ async def record_deposit(session: AsyncSession, payment_intent: dict[str, Any]) 
         logger.error("Deposit %s has no valid totalPrice in its metadata", payment_intent["id"])
         return
 
-    async with session.begin():
-        user_statement = insert(User).values(email=email, user_type="customer")
-        user_id = await session.scalar(
-            user_statement.on_conflict_do_update(
-                index_elements=[User.email],
-                set_={"user_type": "customer", "updated_at": func.now()},
-            ).returning(User.id)
-        )
-
-        values = {
-            "user_id": user_id,
-            "status": "confirmed",
-            "total_price": total_price,
-            "deposit_amount": deposit_amount,
-            "balance_amount": total_price - deposit_amount,
-            "currency": payment_intent["currency"].upper(),
-            "stripe_customer_id": payment_intent.get("customer"),
-            "deposit_payment_intent_id": payment_intent["id"],
-            "payment_status": "deposit_paid",
-            "reservation_date": _reservation_date(payment_intent, metadata),
-            "city": metadata.get("city"),
-        }
-        reservation_statement = insert(Reservation).values(**values)
-        await session.execute(
-            reservation_statement.on_conflict_do_update(
-                index_elements=[Reservation.deposit_payment_intent_id],
-                set_={**values, "updated_at": func.now()},
-            )
+    # Both writes commit together, or neither does.
+    async with connection.transaction():
+        user_id = await connection.fetchval(UPSERT_CUSTOMER, email)
+        await connection.execute(
+            UPSERT_DEPOSIT_RESERVATION,
+            user_id,
+            total_price,
+            deposit_amount,
+            total_price - deposit_amount,
+            payment_intent["currency"].upper(),
+            payment_intent.get("customer"),
+            payment_intent["id"],
+            _reservation_date(payment_intent, metadata),
+            metadata.get("city"),
         )
 
     logger.info("Reservation confirmed for deposit %s", payment_intent["id"])

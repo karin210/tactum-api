@@ -6,7 +6,7 @@ once for a rehearsal and again right before switching traffic to the new API.
 
 Usage (PowerShell, from the project root):
 
-    $env:DATABASE_URL = "postgresql://..."   # target, already migrated with `alembic upgrade head`
+    $env:DATABASE_URL = "postgresql://..."   # target, already run through scripts.migrate
     $env:MONGODB_URI = "mongodb+srv://..."    # source (MONGODB_EARLYADOPTERS_URI in the Next app)
     uv run --group migration python -m scripts.migrate_from_mongo --dry-run
     uv run --group migration python -m scripts.migrate_from_mongo
@@ -14,6 +14,7 @@ Usage (PowerShell, from the project root):
 
 import argparse
 import asyncio
+import json
 import logging
 import os
 from datetime import UTC, datetime
@@ -21,20 +22,72 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
+import asyncpg
 from pymongo import MongoClient
-from sqlalchemy import case, or_, select
-from sqlalchemy.dialects.postgresql import insert
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.db import get_engine
-from app.models import Reservation, User
-from app.models.reservation import PAYMENT_STATUSES, RESERVATION_STATUSES
-from app.models.user import USER_TYPES
+from app.config import get_database_settings
+from app.db import ssl_option
 
 logger = logging.getLogger("migrate_from_mongo")
 
+USER_TYPES = ("lead", "customer")
+RESERVATION_STATUSES = ("pending", "confirmed", "completed", "cancelled")
+PAYMENT_STATUSES = ("unpaid", "deposit_paid", "fully_paid", "refunded")
 
-async def migrate_users(session: AsyncSession, documents: list[dict[str, Any]]) -> dict[str, UUID]:
+# A user who became a customer in either database stays a customer.
+UPSERT_USER = """
+    INSERT INTO users (
+        email, first_name, last_name, phone, city, user_type,
+        stripe_customer_id, legacy_mongo_id, created_at, updated_at
+    )
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+    ON CONFLICT (email) DO UPDATE SET
+        first_name = EXCLUDED.first_name,
+        last_name = EXCLUDED.last_name,
+        phone = EXCLUDED.phone,
+        city = EXCLUDED.city,
+        stripe_customer_id = EXCLUDED.stripe_customer_id,
+        legacy_mongo_id = EXCLUDED.legacy_mongo_id,
+        created_at = EXCLUDED.created_at,
+        updated_at = EXCLUDED.updated_at,
+        user_type = CASE
+            WHEN users.user_type = 'customer' OR EXCLUDED.user_type = 'customer' THEN 'customer'
+            ELSE 'lead'
+        END
+    RETURNING id
+"""
+
+# The new API's webhook may already have written a reservation, so match on either id.
+# A NULL deposit id never equals anything, so it can't match by accident.
+FIND_RESERVATION = """
+    SELECT id FROM reservations
+    WHERE legacy_mongo_id = $1 OR deposit_payment_intent_id = $2
+    LIMIT 1
+"""
+
+INSERT_RESERVATION = """
+    INSERT INTO reservations (
+        user_id, status, total_price, deposit_amount, balance_amount,
+        stripe_customer_id, deposit_payment_intent_id, balance_payment_intent_id,
+        payment_status, reservation_date, city, metadata, legacy_mongo_id,
+        created_at, updated_at
+    )
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13, $14, $15)
+"""
+
+UPDATE_RESERVATION = """
+    UPDATE reservations SET
+        user_id = $1, status = $2, total_price = $3, deposit_amount = $4, balance_amount = $5,
+        stripe_customer_id = $6, deposit_payment_intent_id = $7, balance_payment_intent_id = $8,
+        payment_status = $9, reservation_date = $10, city = $11, metadata = $12::jsonb,
+        legacy_mongo_id = $13, created_at = $14, updated_at = $15
+    WHERE id = $16
+"""
+
+
+async def migrate_users(
+    connection: asyncpg.Connection, documents: list[dict[str, Any]]
+) -> dict[str, UUID]:
     """Upsert every user and return a map from MongoDB id to the new PostgreSQL id."""
     ids: dict[str, UUID] = {}
     for document in documents:
@@ -43,45 +96,26 @@ async def migrate_users(session: AsyncSession, documents: list[dict[str, Any]]) 
             logger.warning("Skipping user %s: no email", document["_id"])
             continue
 
-        values = {
-            "email": email,
-            "first_name": document.get("first_name"),
-            "last_name": document.get("last_name"),
+        user_id = await connection.fetchval(
+            UPSERT_USER,
+            email,
+            document.get("first_name"),
+            document.get("last_name"),
             # Mongoose stored phone as a Number; it's text in PostgreSQL.
-            "phone": _phone(document.get("phone")),
-            "city": document.get("city") or "Other",
-            "user_type": _allowed(document.get("userType"), USER_TYPES, "lead"),
-            "stripe_customer_id": document.get("stripeCustomerId"),
-            "legacy_mongo_id": str(document["_id"]),
-            "created_at": _datetime(document.get("createdAt")),
-            "updated_at": _datetime(document.get("updatedAt")),
-        }
-        statement = insert(User).values(**values)
-        user_id = await session.scalar(
-            statement.on_conflict_do_update(
-                index_elements=[User.email],
-                # A user who became a customer in either database stays a customer.
-                set_={
-                    **{key: statement.excluded[key] for key in values if key != "user_type"},
-                    "user_type": case(
-                        (
-                            or_(
-                                User.user_type == "customer",
-                                statement.excluded.user_type == "customer",
-                            ),
-                            "customer",
-                        ),
-                        else_="lead",
-                    ),
-                },
-            ).returning(User.id)
+            _phone(document.get("phone")),
+            document.get("city") or "Other",
+            _allowed(document.get("userType"), USER_TYPES, "lead"),
+            document.get("stripeCustomerId"),
+            str(document["_id"]),
+            _datetime(document.get("createdAt")),
+            _datetime(document.get("updatedAt")),
         )
         ids[str(document["_id"])] = user_id
     return ids
 
 
 async def migrate_reservations(
-    session: AsyncSession, documents: list[dict[str, Any]], user_ids: dict[str, UUID]
+    connection: asyncpg.Connection, documents: list[dict[str, Any]], user_ids: dict[str, UUID]
 ) -> int:
     migrated = 0
     for document in documents:
@@ -91,40 +125,32 @@ async def migrate_reservations(
             logger.warning("Skipping reservation %s: its user was not migrated", legacy_id)
             continue
 
-        values = {
-            "user_id": user_id,
-            "status": _allowed(document.get("status"), RESERVATION_STATUSES, "pending"),
-            "total_price": _money(document.get("totalPrice")),
-            "deposit_amount": _money(document.get("depositAmount")),
-            "balance_amount": _money(document.get("balanceAmount")),
-            "stripe_customer_id": document.get("stripeCustomerId"),
-            "deposit_payment_intent_id": document.get("depositPaymentIntentId"),
-            "balance_payment_intent_id": document.get("balancePaymentIntentId"),
-            "payment_status": _allowed(document.get("paymentStatus"), PAYMENT_STATUSES, "unpaid"),
-            "reservation_date": _datetime(document.get("reservationDate")),
-            "city": document.get("city"),
-            "extra": document.get("metadata"),
-            "legacy_mongo_id": legacy_id,
-            "created_at": _datetime(document.get("createdAt")),
-            "updated_at": _datetime(document.get("updatedAt")),
-        }
-
-        # The new API's webhook may already have written this reservation, so match on
-        # either id before deciding between update and insert.
-        existing = await session.scalar(
-            select(Reservation).where(
-                (Reservation.legacy_mongo_id == legacy_id)
-                | (
-                    (Reservation.deposit_payment_intent_id == values["deposit_payment_intent_id"])
-                    & (Reservation.deposit_payment_intent_id.is_not(None))
-                )
-            )
+        deposit_payment_intent_id = document.get("depositPaymentIntentId")
+        values = (
+            user_id,
+            _allowed(document.get("status"), RESERVATION_STATUSES, "pending"),
+            _money(document.get("totalPrice")),
+            _money(document.get("depositAmount")),
+            _money(document.get("balanceAmount")),
+            document.get("stripeCustomerId"),
+            deposit_payment_intent_id,
+            document.get("balancePaymentIntentId"),
+            _allowed(document.get("paymentStatus"), PAYMENT_STATUSES, "unpaid"),
+            _datetime(document.get("reservationDate")),
+            document.get("city"),
+            json.dumps(document.get("metadata"), default=str),
+            legacy_id,
+            _datetime(document.get("createdAt")),
+            _datetime(document.get("updatedAt")),
         )
-        if existing:
-            for key, value in values.items():
-                setattr(existing, key, value)
+
+        existing_id = await connection.fetchval(
+            FIND_RESERVATION, legacy_id, deposit_payment_intent_id
+        )
+        if existing_id:
+            await connection.execute(UPDATE_RESERVATION, *values, existing_id)
         else:
-            session.add(Reservation(**values))
+            await connection.execute(INSERT_RESERVATION, *values)
         migrated += 1
     return migrated
 
@@ -137,20 +163,28 @@ async def main(mongo_uri: str, dry_run: bool) -> None:
     reservations = list(source["reservations"].find())
     logger.info("Read %d users and %d reservations from MongoDB", len(users), len(reservations))
 
-    async with async_sessionmaker(get_engine(), expire_on_commit=False)() as session:
-        user_ids = await migrate_users(session, users)
-        migrated = await migrate_reservations(session, reservations, user_ids)
-        logger.info("Prepared %d users and %d reservations", len(user_ids), migrated)
+    settings = get_database_settings()
+    connection = await asyncpg.connect(settings.database_url, ssl=ssl_option(settings))
+    try:
+        transaction = connection.transaction()
+        await transaction.start()
+        try:
+            user_ids = await migrate_users(connection, users)
+            migrated = await migrate_reservations(connection, reservations, user_ids)
+            logger.info("Prepared %d users and %d reservations", len(user_ids), migrated)
+        except BaseException:
+            await transaction.rollback()
+            raise
 
         if dry_run:
-            await session.rollback()
+            await transaction.rollback()
             logger.info("Dry run: nothing was written")
         else:
-            await session.commit()
+            await transaction.commit()
             logger.info("Committed")
-
-    await get_engine().dispose()
-    mongo.close()
+    finally:
+        await connection.close()
+        mongo.close()
 
 
 def _allowed(value: Any, allowed: tuple[str, ...], default: str) -> str:

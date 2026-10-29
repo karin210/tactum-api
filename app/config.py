@@ -5,7 +5,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class DatabaseSettings(BaseSettings):
-    """Only what is needed to reach PostgreSQL, so Alembic and scripts don't need Stripe keys."""
+    """Only what is needed to reach PostgreSQL, so migrations and scripts don't need Stripe keys."""
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
@@ -15,10 +15,6 @@ class DatabaseSettings(BaseSettings):
     database_ssl: Literal["disable", "require", "verify-full"] = "disable"
     # Path to the AWS RDS CA bundle (global-bundle.pem), used with "verify-full".
     database_ssl_root_cert: str | None = None
-
-    @property
-    def sqlalchemy_url(self) -> str:
-        return self.database_url.replace("postgresql://", "postgresql+asyncpg://", 1)
 
 
 class Settings(DatabaseSettings):

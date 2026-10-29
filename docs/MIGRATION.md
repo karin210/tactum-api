@@ -29,7 +29,7 @@ Atlas into PostgreSQL on AWS RDS, without downtime and with a way back at every 
 | `src/app/api/payment-intent/route.ts` | `POST /payment-intents` |
 | `src/app/api/webhooks/stripe/route.ts` | `POST /webhooks/stripe` |
 | `src/app/api/reservations/count/stream/route.ts` (MongoDB change stream) | `GET /reservations/count/stream` (PostgreSQL `LISTEN/NOTIFY`) |
-| `src/server/models/*`, `mongoDBConnection.ts` | `app/models/*`, Alembic migrations |
+| `src/server/models/*`, `mongoDBConnection.ts` | SQL files in `migrations/`, queries in `app/services/` |
 | MongoDB Atlas | AWS RDS for PostgreSQL 17 |
 
 What stays in Next.js: every page, the translations (`next-intl`) and Stripe Elements in the
@@ -253,7 +253,7 @@ docker build -t tactum-api .
 docker run --rm --env-file .env \
   -e DATABASE_URL='postgresql://tactum_owner:<password 1>@tactum-db.xxxxxxxx.mx-central-1.rds.amazonaws.com:5432/tactum' \
   -v /etc/ssl/rds:/etc/ssl/rds:ro \
-  tactum-api alembic upgrade head
+  tactum-api python -m scripts.migrate
 ```
 
 ### 5.4 Start the API

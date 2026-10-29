@@ -8,7 +8,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import get_settings
-from app.db import get_engine, ssl_option
+from app.db import create_pool, ssl_option
 from app.errors import RequestIdMiddleware, register_error_handlers
 from app.routers import health, leads, payments, reservations, webhooks
 from app.services.count_broadcaster import ReservationCountBroadcaster
@@ -19,6 +19,8 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()
+    pool = await create_pool(settings)
+    app.state.pool = pool
     broadcaster = ReservationCountBroadcaster(
         connect=partial(asyncpg.connect, settings.database_url, ssl=ssl_option(settings))
     )
@@ -28,7 +30,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         yield
     finally:
         await broadcaster.stop()
-        await get_engine().dispose()
+        await pool.close()
 
 
 def create_app() -> FastAPI:
