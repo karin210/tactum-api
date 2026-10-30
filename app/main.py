@@ -10,8 +10,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.config import get_settings
 from app.db import create_pool, ssl_option
 from app.errors import RequestIdMiddleware, register_error_handlers
-from app.routers import health, leads, payments, reservations, webhooks
-from app.services.count_broadcaster import ReservationCountBroadcaster
+from app.routers import health, orders, payments, webhooks
+from app.services.count_broadcaster import OrderCountBroadcaster
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
@@ -21,7 +21,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()
     pool = await create_pool(settings)
     app.state.pool = pool
-    broadcaster = ReservationCountBroadcaster(
+    broadcaster = OrderCountBroadcaster(
         connect=partial(asyncpg.connect, settings.database_url, ssl=ssl_option(settings))
     )
     app.state.count_broadcaster = broadcaster
@@ -56,7 +56,7 @@ def create_app() -> FastAPI:
     app.add_middleware(RequestIdMiddleware)
     register_error_handlers(app)
 
-    for module in (health, leads, payments, reservations, webhooks):
+    for module in (health, orders, payments, webhooks):
         app.include_router(module.router)
 
     return app

@@ -4,7 +4,7 @@ import stripe
 from fastapi import Request
 
 from app.config import get_settings
-from app.services.count_broadcaster import ReservationCountBroadcaster
+from app.services.count_broadcaster import OrderCountBroadcaster
 from app.services.payments import DepositPayments
 from app.services.pricing import DepositPricing
 
@@ -27,5 +27,5 @@ def get_deposit_payments() -> DepositPayments:
     return DepositPayments(get_stripe_client(), get_pricing())
 
 
-def get_count_broadcaster(request: Request) -> ReservationCountBroadcaster:
+def get_count_broadcaster(request: Request) -> OrderCountBroadcaster:
     return request.app.state.count_broadcaster

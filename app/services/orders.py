@@ -7,20 +7,20 @@ import asyncpg
 
 logger = logging.getLogger(__name__)
 
-# A lead who pays becomes a customer; a payer we've never seen is created as one.
+# A payer we've never seen is created as a user; a known one is reused.
 UPSERT_CUSTOMER = """
-    INSERT INTO users (email, user_type)
-    VALUES ($1, 'customer')
-    ON CONFLICT (email) DO UPDATE SET user_type = 'customer', updated_at = now()
+    INSERT INTO users (email)
+    VALUES ($1)
+    ON CONFLICT (email) DO UPDATE SET updated_at = now()
     RETURNING id
 """
 
 # Keyed on the unique deposit_payment_intent_id, so a webhook delivered twice updates the
-# same reservation instead of adding a second one.
-UPSERT_DEPOSIT_RESERVATION = """
-    INSERT INTO reservations (
+# same order instead of adding a second one.
+UPSERT_DEPOSIT_ORDER = """
+    INSERT INTO orders (
         user_id, status, total_price, deposit_amount, balance_amount, currency,
-        stripe_customer_id, deposit_payment_intent_id, payment_status, reservation_date, city
+        stripe_customer_id, deposit_payment_intent_id, payment_status, order_date, city
     )
     VALUES ($1, 'confirmed', $2, $3, $4, $5, $6, $7, 'deposit_paid', $8, $9)
     ON CONFLICT (deposit_payment_intent_id) DO UPDATE SET
@@ -32,18 +32,18 @@ UPSERT_DEPOSIT_RESERVATION = """
         currency = EXCLUDED.currency,
         stripe_customer_id = EXCLUDED.stripe_customer_id,
         payment_status = EXCLUDED.payment_status,
-        reservation_date = EXCLUDED.reservation_date,
+        order_date = EXCLUDED.order_date,
         city = EXCLUDED.city,
         updated_at = now()
 """
 
 
-async def count_reservations(connection: asyncpg.Connection) -> int:
-    return await connection.fetchval("SELECT count(*) FROM reservations")
+async def count_orders(connection: asyncpg.Connection) -> int:
+    return await connection.fetchval("SELECT count(*) FROM orders")
 
 
 async def record_deposit(connection: asyncpg.Connection, payment_intent: dict[str, Any]) -> None:
-    """Turn a succeeded deposit PaymentIntent into a customer and a confirmed reservation.
+    """Turn a succeeded deposit PaymentIntent into a customer and a confirmed order.
 
     Safe to run more than once for the same intent: Stripe may deliver a webhook twice,
     and both writes are upserts keyed on unique columns.
@@ -69,7 +69,7 @@ async def record_deposit(connection: asyncpg.Connection, payment_intent: dict[st
     async with connection.transaction():
         user_id = await connection.fetchval(UPSERT_CUSTOMER, email)
         await connection.execute(
-            UPSERT_DEPOSIT_RESERVATION,
+            UPSERT_DEPOSIT_ORDER,
             user_id,
             total_price,
             deposit_amount,
@@ -77,11 +77,11 @@ async def record_deposit(connection: asyncpg.Connection, payment_intent: dict[st
             payment_intent["currency"].upper(),
             payment_intent.get("customer"),
             payment_intent["id"],
-            _reservation_date(payment_intent, metadata),
+            _order_date(payment_intent, metadata),
             metadata.get("city"),
         )
 
-    logger.info("Reservation confirmed for deposit %s", payment_intent["id"])
+    logger.info("Order confirmed for deposit %s", payment_intent["id"])
 
 
 def _customer_email(payment_intent: dict[str, Any], metadata: dict[str, str]) -> str | None:
@@ -98,8 +98,9 @@ def _decimal(value: str | None) -> Decimal | None:
         return None
 
 
-def _reservation_date(payment_intent: dict[str, Any], metadata: dict[str, str]) -> datetime:
+def _order_date(payment_intent: dict[str, Any], metadata: dict[str, str]) -> datetime:
     try:
+        # The key is part of the Stripe metadata contract, so it keeps its old name.
         return datetime.fromisoformat(metadata["reservationDate"])
     except KeyError, ValueError:
         return datetime.fromtimestamp(payment_intent["created"], tz=UTC)

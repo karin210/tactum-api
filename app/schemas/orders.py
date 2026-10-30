@@ -1,5 +1,5 @@
 from app.schemas.base import ApiModel
 
 
-class ReservationCount(ApiModel):
+class OrderCount(ApiModel):
     count: int

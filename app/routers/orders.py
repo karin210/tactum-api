@@ -10,26 +10,27 @@ from fastapi.responses import StreamingResponse
 from app.db import get_connection
 from app.dependencies import get_count_broadcaster
 from app.errors import ApiError
-from app.schemas.reservations import ReservationCount
-from app.services.count_broadcaster import ReservationCountBroadcaster
-from app.services.reservations import count_reservations
+from app.schemas.orders import OrderCount
+from app.services.count_broadcaster import OrderCountBroadcaster
+from app.services.orders import count_orders
 
-router = APIRouter(prefix="/reservations", tags=["reservations"])
+# The URL keeps its old name so the website's counter keeps working.
+router = APIRouter(prefix="/reservations", tags=["orders"])
 
 # Comment lines keep proxies and load balancers from closing an idle stream.
 KEEP_ALIVE_SECONDS = 15
 
 
 @router.get("/count")
-async def reservation_count(
+async def order_count(
     connection: Annotated[asyncpg.Connection, Depends(get_connection)],
-) -> ReservationCount:
-    return ReservationCount(count=await count_reservations(connection))
+) -> OrderCount:
+    return OrderCount(count=await count_orders(connection))
 
 
 @router.get("/count/stream", response_class=StreamingResponse)
-async def reservation_count_stream(
-    broadcaster: Annotated[ReservationCountBroadcaster, Depends(get_count_broadcaster)],
+async def order_count_stream(
+    broadcaster: Annotated[OrderCountBroadcaster, Depends(get_count_broadcaster)],
 ) -> StreamingResponse:
     """Server-Sent Events: sends `{"count": n}` now and again whenever it changes."""
     if not broadcaster.is_connected:

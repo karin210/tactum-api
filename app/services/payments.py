@@ -13,7 +13,7 @@ UPDATABLE_STATUSES = {"requires_payment_method", "requires_confirmation", "requi
 
 
 class DepositPayments:
-    """Creates and updates the Stripe PaymentIntent used to pay a reservation deposit."""
+    """Creates and updates the Stripe PaymentIntent used to pay an order deposit."""
 
     def __init__(self, client: stripe.StripeClient, pricing: DepositPricing) -> None:
         self._client = client

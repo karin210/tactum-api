@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 
 @dataclass(frozen=True)
 class DepositPricing:
-    """The price of a glove reservation and the deposit charged up front, in whole MXN."""
+    """The price of a glove order and the deposit charged up front, in whole MXN."""
 
     total_price_mxn: int
     deposit_mxn: int

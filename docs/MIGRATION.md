@@ -333,9 +333,9 @@ Check the result: the counts should match MongoDB, minus any users the script re
 because they had no email:
 
 ```sql
-SELECT user_type, count(*) FROM users GROUP BY user_type;
-SELECT status, payment_status, count(*) FROM reservations GROUP BY 1, 2;
-SELECT count(*) FROM reservations r LEFT JOIN users u ON u.id = r.user_id WHERE u.id IS NULL; -- 0
+SELECT count(*) FROM users;
+SELECT status, payment_status, count(*) FROM orders GROUP BY 1, 2;
+SELECT count(*) FROM orders r LEFT JOIN users u ON u.id = r.user_id WHERE u.id IS NULL; -- 0
 ```
 
 What the script converts:
@@ -560,7 +560,7 @@ These are deliberate differences from the current Next.js code:
   optional fields left empty don't erase what was saved before.
 - **Phone numbers are stored as text**, so leading zeros and `+52` are kept.
 - The live counter still counts **all** reservations, as before. To count only active ones,
-  change `count_reservations` and the SQL in `ReservationCountBroadcaster._publish`.
+  change `count_orders` and the SQL in `OrderCountBroadcaster._publish`.
 
 ---
 

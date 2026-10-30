@@ -27,23 +27,6 @@ def test_unknown_route_returns_consistent_404(client: TestClient) -> None:
     assert body["requestId"] == response.headers["X-Request-ID"]
 
 
-def test_lead_validation_errors_are_reported_per_field(client: TestClient) -> None:
-    response = client.post("/leads", json={"firstName": "", "email": "not-an-email"})
-    assert response.status_code == 422
-    body = response.json()
-    assert body["code"] == "validation_error"
-    assert set(body["fieldErrors"]) == {"firstName", "email"}
-
-
-def test_lead_rejects_unknown_fields(client: TestClient) -> None:
-    response = client.post(
-        "/leads",
-        json={"firstName": "Ana", "email": "ana@example.com", "userType": "customer"},
-    )
-    assert response.status_code == 422
-    assert "userType" in response.json()["fieldErrors"]
-
-
 def test_payment_intent_rejects_client_supplied_amounts(client: TestClient) -> None:
     response = client.post("/payment-intents", json={"email": "ana@example.com", "totalPrice": 1})
     assert response.status_code == 422

@@ -1,7 +1,7 @@
 [project]
 name = "tactum-api"
 version = "0.1.0"
-description = "Backend API for the Tactum website: leads, Stripe deposits and reservations."
+description = "Backend API for the Tactum website: Stripe deposits and orders."
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [

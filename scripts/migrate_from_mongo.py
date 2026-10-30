@@ -1,6 +1,6 @@
-"""Copy users and reservations from the MongoDB database used by the Next.js app into PostgreSQL.
+"""Copy users and orders from the MongoDB database used by the Next.js app into PostgreSQL.
 
-Safe to re-run: users are matched by email and reservations by their MongoDB id or
+Safe to re-run: users are matched by email and orders by their MongoDB id or
 Stripe deposit id, so a second run updates rows instead of duplicating them. Run it
 once for a rehearsal and again right before switching traffic to the new API.
 
@@ -30,17 +30,15 @@ from app.db import ssl_option
 
 logger = logging.getLogger("migrate_from_mongo")
 
-USER_TYPES = ("lead", "customer")
-RESERVATION_STATUSES = ("pending", "confirmed", "completed", "cancelled")
+ORDER_STATUSES = ("pending", "confirmed", "completed", "cancelled")
 PAYMENT_STATUSES = ("unpaid", "deposit_paid", "fully_paid", "refunded")
 
-# A user who became a customer in either database stays a customer.
 UPSERT_USER = """
     INSERT INTO users (
-        email, first_name, last_name, phone, city, user_type,
+        email, first_name, last_name, phone, city,
         stripe_customer_id, legacy_mongo_id, created_at, updated_at
     )
-    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
     ON CONFLICT (email) DO UPDATE SET
         first_name = EXCLUDED.first_name,
         last_name = EXCLUDED.last_name,
@@ -49,37 +47,33 @@ UPSERT_USER = """
         stripe_customer_id = EXCLUDED.stripe_customer_id,
         legacy_mongo_id = EXCLUDED.legacy_mongo_id,
         created_at = EXCLUDED.created_at,
-        updated_at = EXCLUDED.updated_at,
-        user_type = CASE
-            WHEN users.user_type = 'customer' OR EXCLUDED.user_type = 'customer' THEN 'customer'
-            ELSE 'lead'
-        END
+        updated_at = EXCLUDED.updated_at
     RETURNING id
 """
 
-# The new API's webhook may already have written a reservation, so match on either id.
+# The new API's webhook may already have written an order, so match on either id.
 # A NULL deposit id never equals anything, so it can't match by accident.
-FIND_RESERVATION = """
-    SELECT id FROM reservations
+FIND_ORDER = """
+    SELECT id FROM orders
     WHERE legacy_mongo_id = $1 OR deposit_payment_intent_id = $2
     LIMIT 1
 """
 
-INSERT_RESERVATION = """
-    INSERT INTO reservations (
+INSERT_ORDER = """
+    INSERT INTO orders (
         user_id, status, total_price, deposit_amount, balance_amount,
         stripe_customer_id, deposit_payment_intent_id, balance_payment_intent_id,
-        payment_status, reservation_date, city, metadata, legacy_mongo_id,
+        payment_status, order_date, city, metadata, legacy_mongo_id,
         created_at, updated_at
     )
     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13, $14, $15)
 """
 
-UPDATE_RESERVATION = """
-    UPDATE reservations SET
+UPDATE_ORDER = """
+    UPDATE orders SET
         user_id = $1, status = $2, total_price = $3, deposit_amount = $4, balance_amount = $5,
         stripe_customer_id = $6, deposit_payment_intent_id = $7, balance_payment_intent_id = $8,
-        payment_status = $9, reservation_date = $10, city = $11, metadata = $12::jsonb,
+        payment_status = $9, order_date = $10, city = $11, metadata = $12::jsonb,
         legacy_mongo_id = $13, created_at = $14, updated_at = $15
     WHERE id = $16
 """
@@ -104,7 +98,6 @@ async def migrate_users(
             # Mongoose stored phone as a Number; it's text in PostgreSQL.
             _phone(document.get("phone")),
             document.get("city") or "Other",
-            _allowed(document.get("userType"), USER_TYPES, "lead"),
             document.get("stripeCustomerId"),
             str(document["_id"]),
             _datetime(document.get("createdAt")),
@@ -114,7 +107,7 @@ async def migrate_users(
     return ids
 
 
-async def migrate_reservations(
+async def migrate_orders(
     connection: asyncpg.Connection, documents: list[dict[str, Any]], user_ids: dict[str, UUID]
 ) -> int:
     migrated = 0
@@ -122,13 +115,13 @@ async def migrate_reservations(
         legacy_id = str(document["_id"])
         user_id = user_ids.get(str(document.get("user")))
         if user_id is None:
-            logger.warning("Skipping reservation %s: its user was not migrated", legacy_id)
+            logger.warning("Skipping order %s: its user was not migrated", legacy_id)
             continue
 
         deposit_payment_intent_id = document.get("depositPaymentIntentId")
         values = (
             user_id,
-            _allowed(document.get("status"), RESERVATION_STATUSES, "pending"),
+            _allowed(document.get("status"), ORDER_STATUSES, "pending"),
             _money(document.get("totalPrice")),
             _money(document.get("depositAmount")),
             _money(document.get("balanceAmount")),
@@ -145,12 +138,12 @@ async def migrate_reservations(
         )
 
         existing_id = await connection.fetchval(
-            FIND_RESERVATION, legacy_id, deposit_payment_intent_id
+            FIND_ORDER, legacy_id, deposit_payment_intent_id
         )
         if existing_id:
-            await connection.execute(UPDATE_RESERVATION, *values, existing_id)
+            await connection.execute(UPDATE_ORDER, *values, existing_id)
         else:
-            await connection.execute(INSERT_RESERVATION, *values)
+            await connection.execute(INSERT_ORDER, *values)
         migrated += 1
     return migrated
 
@@ -160,8 +153,8 @@ async def main(mongo_uri: str, dry_run: bool) -> None:
     # Mongoose names collections after the model: User -> users, Reservation -> reservations.
     source = mongo.get_default_database()
     users = list(source["users"].find())
-    reservations = list(source["reservations"].find())
-    logger.info("Read %d users and %d reservations from MongoDB", len(users), len(reservations))
+    orders = list(source["reservations"].find())
+    logger.info("Read %d users and %d orders from MongoDB", len(users), len(orders))
 
     settings = get_database_settings()
     connection = await asyncpg.connect(settings.database_url, ssl=ssl_option(settings))
@@ -170,8 +163,8 @@ async def main(mongo_uri: str, dry_run: bool) -> None:
         await transaction.start()
         try:
             user_ids = await migrate_users(connection, users)
-            migrated = await migrate_reservations(connection, reservations, user_ids)
-            logger.info("Prepared %d users and %d reservations", len(user_ids), migrated)
+            migrated = await migrate_orders(connection, orders, user_ids)
+            logger.info("Prepared %d users and %d orders", len(user_ids), migrated)
         except BaseException:
             await transaction.rollback()
             raise

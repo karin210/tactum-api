@@ -7,15 +7,15 @@ import asyncpg
 
 logger = logging.getLogger(__name__)
 
-# Must match the channel used by the trigger created in the first Alembic migration.
-CHANNEL = "reservations_changed"
+# Must match the channel used by the trigger created in the orders migration.
+CHANNEL = "orders_changed"
 RECONNECT_DELAY_SECONDS = 5
 
 
-class ReservationCountBroadcaster:
-    """Pushes the live reservation count to every open SSE connection.
+class OrderCountBroadcaster:
+    """Pushes the live order count to every open SSE connection.
 
-    One dedicated connection LISTENs on the `reservations_changed` channel, which a
+    One dedicated connection LISTENs on the `orders_changed` channel, which a
     database trigger notifies after any change to the table. On each notification the
     count is re-read once and handed to all subscribers. This replaces the MongoDB
     change stream the Next.js route used.
@@ -34,7 +34,7 @@ class ReservationCountBroadcaster:
         return self._connected
 
     def start(self) -> None:
-        self._task = asyncio.create_task(self._run(), name="reservation-count-broadcaster")
+        self._task = asyncio.create_task(self._run(), name="order-count-broadcaster")
 
     async def stop(self) -> None:
         if self._task:
@@ -60,7 +60,7 @@ class ReservationCountBroadcaster:
             except asyncio.CancelledError:
                 raise
             except Exception:
-                logger.exception("Reservation count listener failed; retrying")
+                logger.exception("Order count listener failed; retrying")
             finally:
                 self._connected = False
             await asyncio.sleep(RECONNECT_DELAY_SECONDS)
@@ -85,7 +85,7 @@ class ReservationCountBroadcaster:
         self._changed.set()
 
     async def _publish(self, connection: asyncpg.Connection) -> None:
-        count: int = await connection.fetchval("SELECT count(*) FROM reservations")
+        count: int = await connection.fetchval("SELECT count(*) FROM orders")
         self._latest = count
         for queue in self._subscribers:
             # A slow client only needs the newest count, so replace anything not yet sent.

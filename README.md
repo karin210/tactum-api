@@ -1,7 +1,7 @@
 # Tactum API
 
-Backend for the [Tactum website](../tactum-website): newsletter leads, Stripe deposit payments and
-glove reservations. FastAPI + [asyncpg](https://magicstack.github.io/asyncpg/) on PostgreSQL (AWS RDS in production).
+Backend for the [Tactum website](../tactum-website): Stripe deposit payments and
+glove orders. FastAPI + [asyncpg](https://magicstack.github.io/asyncpg/) on PostgreSQL (AWS RDS in production).
 There is no ORM: queries are plain SQL strings and the schema is plain SQL files.
 
 Moving the backend out of the Next.js app is described step by step in
@@ -11,10 +11,9 @@ Moving the backend out of the Next.js app is described step by step in
 
 | Method | Path | Purpose |
 |---|---|---|
-| `POST` | `/leads` | Subscribe to news. `201` new lead, `200` existing email updated. |
 | `POST` | `/payment-intents` | Create (`201`) or update (`200`, with `paymentIntentId`) the deposit PaymentIntent. |
-| `POST` | `/webhooks/stripe` | Stripe webhook. Records the reservation on `payment_intent.succeeded`. |
-| `GET` | `/reservations/count` | Current reservation count. |
+| `POST` | `/webhooks/stripe` | Stripe webhook. Records the order on `payment_intent.succeeded`. |
+| `GET` | `/reservations/count` | Current order count. |
 | `GET` | `/reservations/count/stream` | Server-Sent Events: `data: {"count": n}` on connect and on every change. |
 | `GET` | `/health`, `/health/db` | Liveness, and readiness (the database is reachable). |
 
@@ -33,7 +32,7 @@ app/
   dependencies.py    shared FastAPI dependencies (Stripe client, pricing, broadcaster)
   schemas/           Pydantic request/response bodies
   routers/           HTTP endpoints, thin: validate, call a service, shape the response
-  services/          business logic and its SQL (leads, payments, reservations, live counter)
+  services/          business logic and its SQL (payments, orders, live counter)
 migrations/          the database schema, as numbered .sql files
 scripts/             one-off tasks (copying data from MongoDB)
 tests/               unit tests, plus integration tests when TEST_DATABASE_URL is set
@@ -84,7 +83,7 @@ uv run python -m scripts.migrate
 
 The runner applies the files that haven't run yet, each in its own transaction, and records them
 in the `schema_migrations` table. Migrations only move forward; to undo one, write a new file.
-The live counter depends on the `reservations_changed` trigger from the first migration.
+The live counter depends on the `orders_changed` trigger from the `0002` migration.
 
 `updated_at` is not touched automatically: every `UPDATE` and `ON CONFLICT DO UPDATE` must set
 `updated_at = now()` itself.

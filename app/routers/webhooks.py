@@ -9,7 +9,7 @@ from app.config import Settings, get_settings
 from app.db import get_connection
 from app.errors import ApiError
 from app.schemas.payments import WebhookAck
-from app.services.reservations import record_deposit
+from app.services.orders import record_deposit
 
 router = APIRouter(prefix="/webhooks", tags=["webhooks"])
 

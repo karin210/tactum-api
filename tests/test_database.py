@@ -39,24 +39,8 @@ def _deposit_event(email: str, payment_intent_id: str) -> dict[str, object]:
     }
 
 
-def test_lead_is_created_then_updated(live_client: TestClient) -> None:
+def test_deposit_webhook_creates_customer_and_order_once(live_client: TestClient) -> None:
     email = _unique_email()
-
-    created = live_client.post(
-        "/leads", json={"firstName": "Ana", "email": email, "phone": "33 1234 5678"}
-    )
-    assert created.status_code == 201
-    assert created.json()["userType"] == "lead"
-
-    # Re-subscribing with different casing updates the same user and keeps the phone.
-    updated = live_client.post("/leads", json={"firstName": "Ana María", "email": email.upper()})
-    assert updated.status_code == 200
-    assert updated.json()["id"] == created.json()["id"]
-
-
-def test_deposit_webhook_creates_customer_and_reservation_once(live_client: TestClient) -> None:
-    email = _unique_email()
-    live_client.post("/leads", json={"firstName": "Luis", "email": email})
     before = live_client.get("/reservations/count").json()["count"]
 
     payload, signature = signed_stripe_event(_deposit_event(email, f"pi_{uuid.uuid4().hex}"))
@@ -67,10 +51,6 @@ def test_deposit_webhook_creates_customer_and_reservation_once(live_client: Test
         assert response.status_code == 200
 
     assert live_client.get("/reservations/count").json()["count"] == before + 1
-    # The lead was upgraded to a customer, not duplicated.
-    lead = live_client.post("/leads", json={"firstName": "Luis", "email": email})
-    assert lead.status_code == 200
-    assert lead.json()["userType"] == "customer"
 
 
 def test_count_stream_pushes_new_counts(live_client: TestClient) -> None:
